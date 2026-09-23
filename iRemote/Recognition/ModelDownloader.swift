@@ -81,7 +81,7 @@ extension ModelDownloader: URLSessionDownloadDelegate {
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
-        MainActor.assumeIsolated {
+        MainActor.assumeIsolatedCompat {
             onProgress?(totalBytesWritten, totalBytesExpectedToWrite)
         }
     }
@@ -95,10 +95,10 @@ extension ModelDownloader: URLSessionDownloadDelegate {
         // callback — the temp `location` is deleted as soon as the
         // method returns.
         let fm = FileManager.default
-        let destination = MainActor.assumeIsolated { self.destinationPath }
+        let destination = MainActor.assumeIsolatedCompat { self.destinationPath }
         guard let destination else {
             try? fm.removeItem(at: location)
-            MainActor.assumeIsolated {
+            MainActor.assumeIsolatedCompat {
                 self.finish(.failure(DownloadError.noLocation))
             }
             return
@@ -114,12 +114,12 @@ extension ModelDownloader: URLSessionDownloadDelegate {
                 try fm.removeItem(at: destURL)
             }
             try fm.moveItem(at: location, to: destURL)
-            MainActor.assumeIsolated {
+            MainActor.assumeIsolatedCompat {
                 self.finish(.success(destURL))
             }
         } catch {
             try? fm.removeItem(at: location)
-            MainActor.assumeIsolated {
+            MainActor.assumeIsolatedCompat {
                 self.finish(.failure(DownloadError.fileSystem(error)))
             }
         }
@@ -136,7 +136,7 @@ extension ModelDownloader: URLSessionDownloadDelegate {
         if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
             return
         }
-        MainActor.assumeIsolated {
+        MainActor.assumeIsolatedCompat {
             self.finish(.failure(error))
         }
     }

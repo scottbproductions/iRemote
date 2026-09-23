@@ -45,6 +45,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var manageModelsAction: (() -> Void)?
     private var installProfileAction: (() -> Void)?
     private var restartAppAction: (() -> Void)?
+    /// Touchpad mode + pointer speed rows (UM fork). Set by AppDelegate.
+    private var pointerModeEnabled = true
+    private var pointerSpeed: TrackpadDriver.PointerSpeed = .normal
+    private var setPointerModeAction: ((Bool) -> Void)?
+    private var setPointerSpeedAction: ((TrackpadDriver.PointerSpeed) -> Void)?
     private var profileStatus: ProfileMonitor.Status = .listenerStopped
     private let statusGlyphView = StatusGlyphView(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
     /// Kept across rebuilds so `menu(_:willHighlight:)` can morph the
@@ -95,13 +100,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: NSMenuDelegate
 
     nonisolated func menuWillOpen(_ menu: NSMenu) {
-        MainActor.assumeIsolated {
+        MainActor.assumeIsolatedCompat {
             self.menuIsOpen = true
         }
     }
 
     nonisolated func menuDidClose(_ menu: NSMenu) {
-        MainActor.assumeIsolated {
+        MainActor.assumeIsolatedCompat {
             self.menuIsOpen = false
             // Reset the Bluetooth Access row to its base appearance
             // so a future open doesn't start with a stale hover
@@ -116,7 +121,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// hover transition during menu tracking, including with `nil` when
     /// the user moves out of the menu entirely; we use that to revert.
     nonisolated func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
-        MainActor.assumeIsolated {
+        MainActor.assumeIsolatedCompat {
             self.applyBluetoothHoverMorph(highlightedItem: item)
         }
     }
@@ -189,6 +194,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// coloured icon and label refresh whenever the status changes,
     /// and refreshes the menu-bar glyph because the warning overlay
     /// depends on the profile state.
+    func installTouchpadControls(
+        pointerMode: Bool,
+        speed: TrackpadDriver.PointerSpeed,
+        setPointerMode: @escaping (Bool) -> Void,
+        setSpeed: @escaping (TrackpadDriver.PointerSpeed) -> Void
+    ) {
+        pointerModeEnabled = pointerMode
+        pointerSpeed = speed
+        setPointerModeAction = setPointerMode
+        setPointerSpeedAction = setSpeed
+        rebuildMenu()
+    }
+
     func setProfileStatus(_ status: ProfileMonitor.Status) {
         guard profileStatus != status else { return }
         profileStatus = status
@@ -424,8 +442,55 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             menu.addItem(item)
         }
 
-        if calibrateTouchpadAction != nil || resetCalibrationAction != nil {
+        if calibrateTouchpadAction != nil || resetCalibrationAction != nil || setPointerModeAction != nil {
             menu.addItem(.separator())
+        }
+
+        // Touchpad: Mouse Pointer (on) vs. Focus Highlight (off)
+        if let setMode = setPointerModeAction {
+            let item = NSMenuItem(
+                title: "Touchpad Moves Mouse Pointer",
+                action: #selector(ClosureTarget.invoke),
+                keyEquivalent: ""
+            )
+            item.image = menuSymbolImage("cursorarrow")
+            item.state = pointerModeEnabled ? .on : .off
+            let enabled = pointerModeEnabled
+            let target = ClosureTarget { [weak self] in
+                self?.pointerModeEnabled = !enabled
+                setMode(!enabled)
+                self?.rebuildMenu()
+            }
+            item.target = target
+            item.representedObject = target
+            menu.addItem(item)
+        }
+
+        // Pointer Speed ▸ Slow / Normal / Fast
+        if let setSpeed = setPointerSpeedAction {
+            let parent = NSMenuItem(title: "Pointer Speed", action: nil, keyEquivalent: "")
+            parent.image = menuSymbolImage("gauge.with.dots.needle.33percent")
+            let sub = NSMenu()
+            sub.autoenablesItems = false
+            for speed in TrackpadDriver.PointerSpeed.allCases {
+                let item = NSMenuItem(
+                    title: speed.title,
+                    action: #selector(ClosureTarget.invoke),
+                    keyEquivalent: ""
+                )
+                item.state = (speed == pointerSpeed) ? .on : .off
+                let target = ClosureTarget { [weak self] in
+                    self?.pointerSpeed = speed
+                    setSpeed(speed)
+                    self?.rebuildMenu()
+                }
+                item.target = target
+                item.representedObject = target
+                sub.addItem(item)
+            }
+            parent.submenu = sub
+            parent.isEnabled = pointerModeEnabled
+            menu.addItem(parent)
         }
 
         // Calibrate Touchpad…

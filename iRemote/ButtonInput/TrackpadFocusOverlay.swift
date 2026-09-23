@@ -136,7 +136,7 @@ final class TrackpadFocusOverlay {
     private func startMotionTimer() {
         guard motionTimer == nil else { return }
         let timer = Timer(timeInterval: Self.frameInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.advanceFrame()
             }
         }

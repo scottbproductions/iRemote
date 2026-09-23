@@ -45,3 +45,4 @@ captures/
 .vscode/
 *.swp
 *.swo
+iRemote.xcodeproj/

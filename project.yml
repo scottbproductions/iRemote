@@ -3,15 +3,15 @@ name: iRemote
 options:
   bundleIdPrefix: io.github.jono-shaw
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "13.0"
   developmentLanguage: en
   groupSortPosition: top
   generateEmptyDirectories: true
 
 settings:
   base:
-    SWIFT_VERSION: "5.10"
-    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
     DEAD_CODE_STRIPPING: YES
     CLANG_ENABLE_MODULES: YES
     CLANG_ENABLE_OBJC_ARC: YES
@@ -39,7 +39,7 @@ targets:
       path: iRemote/Resources/Info.plist
       properties:
         LSUIElement: true
-        LSMinimumSystemVersion: "14.0"
+        LSMinimumSystemVersion: "13.0"
         NSHumanReadableCopyright: "Copyright © 2026 Jono Shaw. Released under the MIT License."
         NSBluetoothAlwaysUsageDescription: "iRemote uses your paired Siri Remote for trackpad navigation, button events, and microphone dictation."
         NSMicrophoneUsageDescription: "iRemote dictates audio captured from the Siri Remote's built-in microphone. No system microphone is used."

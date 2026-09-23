@@ -184,7 +184,31 @@ final class RemoteDictationService {
 
     private let launchDaemonLabel = "com.iremote.packetlogger"
     private let launchDaemonPlistPath = "/Library/LaunchDaemons/com.iremote.packetlogger.plist"
-    private let captureHelperPath = "/usr/local/bin/iremote-capture-helper"
+    private let captureHelperPath = "/Library/PrivilegedHelperTools/iremote-capture-helper"
+    /// Upstream's location. On Intel Macs Homebrew makes /usr/local/bin
+    /// user-writable, so a root helper there is a root backdoor; the
+    /// installer deletes it.
+    private let legacyCaptureHelperPath = "/usr/local/bin/iremote-capture-helper"
+    /// Root-owned copy of PacketLogger that the root helper runs. A copy in
+    /// ~/Downloads is user-writable and must never be executed as root.
+    private let rootPacketLoggerApp = "/Library/PrivilegedHelperTools/iRemote-PacketLogger.app"
+    /// Where the root helper writes captures. Root-owned; the invoking
+    /// user reads through an ACL. Nothing root writes lives in /tmp.
+    nonisolated static let rootCaptureBase = "/private/var/iremote"
+
+    /// The PacketLogger capture for a workdir lives in the root-owned tree,
+    /// keyed by the workdir's last path component.
+    nonisolated static func rootCaptureDir(forWorkDir workDir: String) -> String {
+        "\(rootCaptureBase)/\((workDir as NSString).lastPathComponent)"
+    }
+
+    nonisolated static func pklgPath(forWorkDir workDir: String) -> String {
+        "\(rootCaptureDir(forWorkDir: workDir))/remote.pklg"
+    }
+
+    /// Homebrew lives in /opt/homebrew on Apple Silicon, /usr/local on Intel.
+    nonisolated static let brewPrefix: String =
+        FileManager.default.fileExists(atPath: "/opt/homebrew/bin/brew") ? "/opt/homebrew" : "/usr/local"
     private let sudoersPath = "/etc/sudoers.d/iremote-packetlogger"
     private let extractorPath = "/tmp/extract-remote-opus"
     private let decoderPath = "/tmp/decode-remote-opus-v3"
@@ -353,13 +377,32 @@ final class RemoteDictationService {
         }
 
         let user = NSUserName()
-        let helperScript = Self.captureHelperScript(packetLoggerPath: packetLoggerPath)
+        // PacketLogger.app bundle that the user installed (anywhere) —
+        // copied into a root-owned location so root never executes a
+        // user-writable binary.
+        // packetLoggerPath = <somewhere>/PacketLogger.app/Contents/Resources/packetlogger
+        let userAppPath = URL(fileURLWithPath: packetLoggerPath)
+            .deletingLastPathComponent()   // Resources
+            .deletingLastPathComponent()   // Contents
+            .deletingLastPathComponent()   // PacketLogger.app
+            .path
+        let rootPacketLogger = "\(rootPacketLoggerApp)/Contents/Resources/packetlogger"
+        let helperScript = Self.captureHelperScript(packetLoggerPath: rootPacketLogger)
         let sudoers = "\(user) ALL=(root) NOPASSWD: \(captureHelperPath)\n"
         let command = [
             "set -e",
             "/bin/launchctl bootout system/\(launchDaemonLabel) >/dev/null 2>&1 || true",
             "rm -f \(Self.shQuote(launchDaemonPlistPath))",
-            "mkdir -p /usr/local/bin /etc/sudoers.d",
+            "rm -f \(Self.shQuote(legacyCaptureHelperPath))",
+            "mkdir -p /Library/PrivilegedHelperTools /etc/sudoers.d",
+            "chown root:wheel /Library/PrivilegedHelperTools",
+            "rm -rf \(Self.shQuote(rootPacketLoggerApp))",
+            "/usr/bin/ditto \(Self.shQuote(userAppPath)) \(Self.shQuote(rootPacketLoggerApp))",
+            "chown -R root:wheel \(Self.shQuote(rootPacketLoggerApp))",
+            "chmod -R go-w \(Self.shQuote(rootPacketLoggerApp))",
+            "mkdir -p \(Self.shQuote(Self.rootCaptureBase))",
+            "chown root:wheel \(Self.shQuote(Self.rootCaptureBase))",
+            "chmod 755 \(Self.shQuote(Self.rootCaptureBase))",
             "cat > \(Self.shQuote(captureHelperPath)) <<'IREMOTE_HELPER'",
             helperScript,
             "IREMOTE_HELPER",
@@ -464,11 +507,12 @@ final class RemoteDictationService {
 
         let helperPath = captureHelperPath
         let workDir = rollingWorkDir
-        let pklgPath = "\(workDir)/remote.pklg"
+        let pklgPath = Self.pklgPath(forWorkDir: workDir)
         _ = try? await Task.detached(priority: .userInitiated) {
             try Self.runExecutable("/usr/bin/sudo", arguments: ["-n", helperPath, "stop", workDir])
         }.value
         try? FileManager.default.removeItem(atPath: workDir)
+        try? FileManager.default.createDirectory(atPath: workDir, withIntermediateDirectories: true)
         activeRollingWorkDir = workDir
 
         _ = try await Task.detached(priority: .userInitiated) {
@@ -480,28 +524,28 @@ final class RemoteDictationService {
         monitor.start(
             onBytes: { [weak self] byteCount in
                 Self.dispatchOnMainAllModes { [weak self] in
-                    MainActor.assumeIsolated {
+                    MainActor.assumeIsolatedCompat {
                         self?.eventHandler?(.captureActive(byteCount))
                     }
                 }
             },
             onFrame: { [weak self] frame in
                 Self.dispatchOnMainAllModes { [weak self] in
-                    MainActor.assumeIsolated {
+                    MainActor.assumeIsolatedCompat {
                         self?.handleRemoteVoiceFrame(frame)
                     }
                 }
             },
             onButton: { [weak self] code in
                 Self.dispatchOnMainAllModes { [weak self] in
-                    MainActor.assumeIsolated {
+                    MainActor.assumeIsolatedCompat {
                         self?.eventHandler?(.remoteButton(code: code))
                     }
                 }
             },
             onTouchpad: { [weak self] sample in
                 Self.dispatchOnMainAllModes { [weak self] in
-                    MainActor.assumeIsolated {
+                    MainActor.assumeIsolatedCompat {
                         self?.eventHandler?(.touchpadSample(sample))
                     }
                 }
@@ -577,7 +621,7 @@ final class RemoteDictationService {
         let runID = UUID().uuidString
         let workDir = "/tmp/iremote-app-\(runID)"
         let environment = [
-            "PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "PATH=\(Self.brewPrefix)/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "PACKETLOGGER=\(Self.shQuote(packetLoggerPath))",
             "PACKETLOGGER_EXTRA_ARGS=-b",
             "DURATION=\(duration)",
@@ -706,7 +750,7 @@ final class RemoteDictationService {
             do {
                 let version = try Self.runExecutable("/usr/bin/sudo", arguments: ["-n", helperPath, "version"])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard version == "iremote-capture-helper 1" else { return false }
+                guard version == "iremote-capture-helper 2-um" else { return false }
                 _ = try Self.runExecutable("/usr/bin/sudo", arguments: ["-n", helperPath, "check"])
                 return true
             } catch {
@@ -748,32 +792,79 @@ final class RemoteDictationService {
         }.value
     }
 
+    /// Root helper, hardened in the UM fork (2026-09-22).
+    ///
+    /// Upstream ran PacketLogger as root inside user-writable `/tmp`
+    /// workdirs, `chown -R`'d them, and lived in `/usr/local/bin` — which
+    /// Intel Homebrew makes user-writable. Any process running as the user
+    /// could swap the helper, or pass `/tmp/iremote-window-/../../etc` as a
+    /// workdir (a `case` glob `*` matches `/`), and get root with no
+    /// password. This version:
+    ///   - lives in root-owned `/Library/PrivilegedHelperTools/`
+    ///   - runs a root-owned COPY of PacketLogger, never one in ~/Downloads
+    ///   - validates the workdir to a single `[A-Za-z0-9-]` path component
+    ///   - never writes, chowns or reads inside `/tmp`: captures go to
+    ///     root-owned `/private/var/iremote/<key>/`, readable only by the
+    ///     invoking user through an inherited ACL
+    ///   - keeps pid files where the user cannot rewrite them, so `stop`
+    ///     can never be aimed at an arbitrary process
     private nonisolated static func captureHelperScript(packetLoggerPath: String) -> String {
         let packetLogger = Self.shQuote(packetLoggerPath)
+        let rootBase = Self.shQuote(rootCaptureBase)
         return """
         #!/bin/sh
         set -eu
+        PATH=/usr/bin:/bin:/usr/sbin:/sbin
+        export PATH
+        umask 022
         packetlogger=\(packetLogger)
+        root_base=\(rootBase)
         command="${1:-}"
         workdir="${2:-}"
         legacy_label="com.iremote.packetlogger"
         legacy_plist="/Library/LaunchDaemons/com.iremote.packetlogger.plist"
+        key=""
+        rootdir=""
+
+        bad_workdir() {
+          echo "invalid workdir: $workdir" >&2
+          exit 65
+        }
 
         valid_workdir() {
           case "$workdir" in
-            /tmp/iremote-window-*|/tmp/iremote-trigger-*|/tmp/iremote-app-*|/tmp/iremote-dictate-*|/tmp/iremote-utt-*) return 0 ;;
-            *) echo "invalid workdir: $workdir" >&2; return 1 ;;
+            /tmp/*) ;;
+            *) bad_workdir ;;
           esac
+          key="${workdir#/tmp/}"
+          case "$key" in
+            ""|*/*|*..*|*[!A-Za-z0-9-]*) bad_workdir ;;
+            iremote-window-*|iremote-trigger-*|iremote-app-*|iremote-dictate-*|iremote-utt-*) ;;
+            *) bad_workdir ;;
+          esac
+          rootdir="$root_base/$key"
         }
 
-        console_user() {
-          stat -f %Su /dev/console 2>/dev/null || echo jono
+        invoking_user() {
+          u="${SUDO_USER:-}"
+          case "$u" in
+            ""|root|*[!A-Za-z0-9._-]*) echo "helper must be run through sudo by a normal user" >&2; exit 77 ;;
+          esac
+          /usr/bin/id -u "$u" >/dev/null 2>&1 || { echo "unknown user: $u" >&2; exit 77; }
+          echo "$u"
+        }
+
+        ensure_root_base() {
+          if [ -L "$root_base" ]; then rm -f "$root_base"; fi
+          mkdir -p "$root_base"
+          chown root:wheel "$root_base"
+          chmod 755 "$root_base"
         }
 
         running_pid() {
-          pidfile="$1/pid"
-          pid="$(cat "$pidfile" 2>/dev/null || true)"
-          if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+          pid="$(cat "$1/pid" 2>/dev/null || true)"
+          case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+          if kill -0 "$pid" 2>/dev/null; then
             echo "$pid"
             return 0
           fi
@@ -783,50 +874,62 @@ final class RemoteDictationService {
         stop_pid() {
           dir="$1"
           pid="$(cat "$dir/pid" 2>/dev/null || true)"
-          if [ -n "$pid" ]; then
-            kill -INT "$pid" 2>/dev/null || true
-            i=0
-            while [ "$i" -lt 100 ]; do
-              if ! kill -0 "$pid" 2>/dev/null; then break; fi
-              sleep 0.1
-              i=$((i + 1))
-            done
-            if kill -0 "$pid" 2>/dev/null; then
-              kill -TERM "$pid" 2>/dev/null || true
-              sleep 0.2
-            fi
+          case "$pid" in ""|*[!0-9]*) return 0 ;; esac
+          kill -INT "$pid" 2>/dev/null || true
+          i=0
+          while [ "$i" -lt 100 ]; do
+            if ! kill -0 "$pid" 2>/dev/null; then break; fi
+            sleep 0.1
+            i=$((i + 1))
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 0.2
           fi
         }
 
+        prune_stale() {
+          for d in "$root_base"/iremote-*; do
+            [ -d "$d" ] || continue
+            if running_pid "$d" >/dev/null; then continue; fi
+            if [ -n "$(find "$d" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
+              rm -rf "$d"
+            fi
+          done
+        }
+
+        fresh_rootdir() {
+          user="$(invoking_user)"
+          ensure_root_base
+          stop_pid "$rootdir" 2>/dev/null || true
+          rm -rf "$rootdir"
+          mkdir "$rootdir"
+          chown root:wheel "$rootdir"
+          chmod 700 "$rootdir"
+          /bin/chmod +a "user:$user allow list,search,readattr,readextattr,readsecurity,read,file_inherit,directory_inherit" "$rootdir"
+          : > "$rootdir/packetlogger.log"
+        }
+
         start_packetlogger() {
-          dir="$1"
-          outfile="$2"
-          user="$(console_user)"
-          mkdir -p "$dir"
-          : > "$dir/packetlogger.log"
-          chown -R "$user":staff "$dir" 2>/dev/null || true
-          chmod 755 "$dir" 2>/dev/null || true
+          fresh_rootdir
           trap '' HUP
           # `-o FILE` writes the binary HCI capture format the parser
-          # expects. We previously tried `-s > FILE` for unbuffered output
-          # via stdbuf, but `-s` is text-only and `stdbuf` is blocked by
-          # PacketLogger's library-validation flag — so the output was
-          # garbage and broke voice/MENU/touchpad. Stick with `-o`.
-          nohup "$packetlogger" convert -b -o "$outfile" > "$dir/packetlogger.log" 2>&1 < /dev/null &
+          # expects (`-s` is text-only). Root writes only inside its own
+          # root-owned directory.
+          nohup "$packetlogger" convert -b -o "$rootdir/remote.pklg" > "$rootdir/packetlogger.log" 2>&1 < /dev/null &
           pid=$!
-          echo "$pid" > "$dir/pid"
+          echo "$pid" > "$rootdir/pid"
           sleep 0.45
           if ! kill -0 "$pid" 2>/dev/null; then
-            cat "$dir/packetlogger.log" 2>/dev/null || true
+            cat "$rootdir/packetlogger.log" 2>/dev/null || true
             exit 70
           fi
-          chown -R "$user":staff "$dir" 2>/dev/null || true
           echo "$pid"
         }
 
         case "$command" in
           version)
-            echo "iremote-capture-helper 1"
+            echo "iremote-capture-helper 2-um"
             ;;
           check)
             test -x "$packetlogger"
@@ -834,14 +937,12 @@ final class RemoteDictationService {
           cleanup-legacy)
             /bin/launchctl bootout system/$legacy_label >/dev/null 2>&1 || true
             rm -f "$legacy_plist"
+            ensure_root_base
+            prune_stale
             ;;
           profile-status)
-            # Authoritative check for the Apple Bluetooth-debug
-            # configuration profile (PayloadIdentifier
-            # `com.apple.bluetooth.logging`). System-scoped profiles
-            # are invisible without root, which sudo gives us here.
-            # Prints `installed` or `missing` and always exits 0; the
-            # Swift caller treats anything else as `unknown`.
+            # System-scoped profiles are invisible without root. Prints
+            # `installed` or `missing` and always exits 0.
             if /usr/bin/profiles list 2>/dev/null | grep -q "com.apple.bluetooth.logging"; then
               echo "installed"
               exit 0
@@ -858,54 +959,32 @@ final class RemoteDictationService {
             exit 0
             ;;
           stream)
-            mkdir -p /tmp/iremote-stream
-            exec "$packetlogger" convert -b -s -f tr 2> /tmp/iremote-stream/packetlogger.log
+            ensure_root_base
+            exec "$packetlogger" convert -b -s -f tr 2> "$root_base/stream.log"
             ;;
           capture)
             valid_workdir
+            invoking_user >/dev/null
             duration="${3:-1.5}"
-            user="$(console_user)"
-            mkdir -p "$workdir"
-            rm -f "$workdir/remote.pklg" "$workdir/remote-opus.bin" "$workdir/remote-hid.bin" "$workdir/remote.wav" "$workdir/packetlogger.log" "$workdir/pid"
-            : > "$workdir/packetlogger.log"
-            chown -R "$user":staff "$workdir" 2>/dev/null || true
-            chmod 755 "$workdir" 2>/dev/null || true
-            nohup "$packetlogger" convert -b -o "$workdir/remote.pklg" > "$workdir/packetlogger.log" 2>&1 < /dev/null &
-            pid=$!
-            echo "$pid" > "$workdir/pid"
-            sleep 0.35
-            if ! kill -0 "$pid" 2>/dev/null; then
-              cat "$workdir/packetlogger.log" 2>/dev/null || true
-              exit 70
-            fi
+            case "$duration" in ""|*[!0-9.]*) echo "invalid duration" >&2; exit 65 ;; esac
+            start_packetlogger >/dev/null
+            pid="$(cat "$rootdir/pid")"
             sleep "$duration"
-            kill -INT "$pid" 2>/dev/null || true
-            i=0
-            while [ "$i" -lt 100 ]; do
-              if ! kill -0 "$pid" 2>/dev/null; then break; fi
-              sleep 0.1
-              i=$((i + 1))
-            done
-            if kill -0 "$pid" 2>/dev/null; then
-              kill -TERM "$pid" 2>/dev/null || true
-              sleep 0.2
-            fi
-            wait "$pid" 2>/dev/null || true
-            chown -R "$user":staff "$workdir" 2>/dev/null || true
+            stop_pid "$rootdir"
             ;;
           start)
             valid_workdir
-            rm -f "$workdir/remote.pklg" "$workdir/remote-opus.bin" "$workdir/remote-hid.bin" "$workdir/remote.wav" "$workdir/packetlogger.log" "$workdir/pid"
-            start_packetlogger "$workdir" "$workdir/remote.pklg"
+            invoking_user >/dev/null
+            ensure_root_base
+            prune_stale
+            start_packetlogger
             ;;
           stop)
             valid_workdir
-            stop_pid "$workdir"
-            user="$(console_user)"
-            chown -R "$user":staff "$workdir" 2>/dev/null || true
-            if [ ! -s "$workdir/remote.pklg" ]; then
+            stop_pid "$rootdir"
+            if [ ! -s "$rootdir/remote.pklg" ]; then
               echo "remote.pklg is empty" >&2
-              cat "$workdir/packetlogger.log" 2>/dev/null || true
+              cat "$rootdir/packetlogger.log" 2>/dev/null || true
               exit 71
             fi
             ;;
@@ -939,7 +1018,7 @@ final class RemoteDictationService {
         projectRoot: String,
         extractorPath: String
     ) throws -> [Data] {
-        let pklgPath = "\(workDir)/remote.pklg"
+        let pklgPath = Self.pklgPath(forWorkDir: workDir)
         let opusPath = "\(workDir)/remote-opus.bin"
         let rawHidPath = "\(workDir)/remote-hid.bin"
 
@@ -984,14 +1063,14 @@ final class RemoteDictationService {
         whisperModelPath: String,
         language: String
     ) throws -> RemoteDictationResult {
-        let pklgPath = "\(workDir)/remote.pklg"
+        let pklgPath = Self.pklgPath(forWorkDir: workDir)
         let opusPath = "\(workDir)/remote-opus.bin"
         let rawHidPath = "\(workDir)/remote-hid.bin"
         let wavPath = "\(workDir)/remote-raw.wav"
         let processedWavPath = "\(workDir)/remote-voice.wav"
         let whisperWavPath = "\(workDir)/remote-whisper.wav"
         let transcriptPath = "\(workDir)/transcript.txt"
-        let packetLoggerLog = Self.readTextIfExists("\(workDir)/packetlogger.log")
+        let packetLoggerLog = Self.readTextIfExists("\(Self.rootCaptureDir(forWorkDir: workDir))/packetlogger.log")
 
         guard FileManager.default.fileExists(atPath: pklgPath) else {
             throw RemoteDictationServiceError.failed("No PacketLogger capture was created")
@@ -1108,7 +1187,7 @@ final class RemoteDictationService {
         cleanedWavPath: String,
         fallbackWavPath: String
     ) throws -> String {
-        let ffmpeg = "/opt/homebrew/bin/ffmpeg"
+        let ffmpeg = "\(brewPrefix)/bin/ffmpeg"
         guard FileManager.default.isExecutableFile(atPath: ffmpeg) else {
             return rawWavPath
         }
@@ -1186,8 +1265,8 @@ final class RemoteDictationService {
             arguments: [
                 "\(projectRoot)/Tools/decode-remote-opus.c",
                 "-lopus",
-                "-I/opt/homebrew/include",
-                "-L/opt/homebrew/lib",
+                "-I\(brewPrefix)/include",
+                "-L\(brewPrefix)/lib",
                 "-o",
                 decoderPath,
             ]

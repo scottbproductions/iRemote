@@ -9,8 +9,44 @@ import ApplicationServices
 /// promotes the target app/window and posts a real mouse click at the focus
 /// point so blank areas and cross-app UI behave like normal cursor clicks.
 /// AXPress/AXSelected/AXFocused remain as fallback activation paths.
+///
+/// UM fork: a second mode, **pointer** (the default), makes the touchpad a
+/// plain relative mouse — the real macOS cursor moves, clickpad press/release
+/// are real mouse down/up (so click-and-drag works), with double/triple-click
+/// counts. The original focus-highlight mode stays one menu toggle away.
 @MainActor
 final class TrackpadDriver {
+    enum PointerSpeed: String, CaseIterable {
+        case slow, normal, fast
+
+        var title: String {
+            switch self {
+            case .slow: return "Slow"
+            case .normal: return "Normal"
+            case .fast: return "Fast"
+            }
+        }
+
+        var gain: Double {
+            switch self {
+            case .slow: return 0.6
+            case .normal: return 1.0
+            case .fast: return 1.7
+            }
+        }
+    }
+
+    private static let pointerModeDefaultsKey = "iRemote.trackpad.pointerMode"
+    private static let pointerSpeedDefaultsKey = "iRemote.trackpad.pointerSpeed"
+
+    private(set) var pointerMode: Bool
+    private(set) var pointerSpeed: PointerSpeed
+    /// Pointer mode multiplies the focus-mode sensitivities by this. The
+    /// focus dot was deliberately slow; a pointer needs to cross the screen
+    /// in a swipe or two. Tunable with IREMOTE_POINTER_GAIN.
+    private let pointerBaseGain: Double
+    /// Click count of the mouse-down still held, so mouse-up matches it.
+    private var pointerPressClickCount = 1
     private struct FocusTarget {
         let element: AXUIElement
         let frame: CGRect
@@ -109,6 +145,10 @@ final class TrackpadDriver {
         // UserDefaults from then on.
         self.calibration = TouchpadCalibration.loadFromDefaults()
         self.allowMouseFallback = env["IREMOTE_TRACKPAD_MOUSE_FALLBACK"] == "1"
+        self.pointerBaseGain = Double(env["IREMOTE_POINTER_GAIN"] ?? "") ?? 2.2
+        let defaults = UserDefaults.standard
+        self.pointerMode = defaults.object(forKey: Self.pointerModeDefaultsKey) as? Bool ?? true
+        self.pointerSpeed = PointerSpeed(rawValue: defaults.string(forKey: Self.pointerSpeedDefaultsKey) ?? "") ?? .normal
         self.debugLog = env["IREMOTE_TRACKPAD_DEBUG"] == "1" ? TrackpadDebugLog() : nil
 
         if let screen = NSScreen.main ?? NSScreen.screens.first {
@@ -125,13 +165,28 @@ final class TrackpadDriver {
         self.calibration = calibration
     }
 
+    func setPointerMode(_ enabled: Bool) {
+        if isPressed { pointerUp() }
+        pointerMode = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.pointerModeDefaultsKey)
+        selectedTarget = nil
+        overlay.hideImmediately()
+    }
+
+    func setPointerSpeed(_ speed: PointerSpeed) {
+        pointerSpeed = speed
+        UserDefaults.standard.set(speed.rawValue, forKey: Self.pointerSpeedDefaultsKey)
+    }
+
     func onSample(_ sample: RemoteTouchpadSample) {
         updateClickState(sample: sample)
 
         guard sample.isTouching else {
             resetTouchTracking()
             selectedTarget = nil
-            overlay.scheduleHide(after: idleHideSeconds)
+            if !pointerMode {
+                overlay.scheduleHide(after: idleHideSeconds)
+            }
             return
         }
 
@@ -146,13 +201,19 @@ final class TrackpadDriver {
 
         guard let prevX = lastX, let prevY = lastY, let prevSampleTime = lastSampleTime else {
             resetMotionState()
-            updateSelection(at: focusPoint)
+            if pointerMode {
+                // Start from wherever the Mac's own trackpad/mouse left
+                // the cursor, so the two never fight.
+                focusPoint = Self.currentCursorLocation() ?? focusPoint
+            } else {
+                updateSelection(at: focusPoint)
+            }
             return
         }
 
         if sampleTime - prevSampleTime > sampleGapResetSeconds {
             resetMotionState()
-            updateSelection(at: focusPoint)
+            if !pointerMode { updateSelection(at: focusPoint) }
             return
         }
 
@@ -161,7 +222,7 @@ final class TrackpadDriver {
         guard abs(rawDx) <= discontinuityResetRawUnits,
               abs(rawDy) <= discontinuityResetRawUnits else {
             resetMotionState()
-            updateSelection(at: focusPoint)
+            if !pointerMode { updateSelection(at: focusPoint) }
             return
         }
 
@@ -185,7 +246,7 @@ final class TrackpadDriver {
         if abs(rawDx) <= activeDeadZone { rawDx = 0 }
         if abs(rawDy) <= activeDeadZone { rawDy = 0 }
         guard rawDx != 0 || rawDy != 0 else {
-            updateSelection(at: focusPoint)
+            if !pointerMode { updateSelection(at: focusPoint) }
             return
         }
 
@@ -196,8 +257,30 @@ final class TrackpadDriver {
         // or BLE Y-axis origin.
         let (visualDx, visualDy) = calibration.mapDelta(rawDx: rawDx, rawDy: rawDy)
 
-        let dx = smoothedMotion(input: visualDx * xSensitivity, previous: &smoothedDx)
-        let dy = smoothedMotion(input: visualDy * ySensitivity, previous: &smoothedDy)
+        var dx = smoothedMotion(input: visualDx * xSensitivity, previous: &smoothedDx)
+        var dy = smoothedMotion(input: visualDy * ySensitivity, previous: &smoothedDy)
+
+        if pointerMode {
+            // Mild acceleration: slow strokes stay precise, fast swipes
+            // travel. Factor grows with per-sample speed, capped at 3x.
+            let gain = pointerBaseGain * pointerSpeed.gain
+            let speed = hypot(dx, dy) * gain
+            let accel = min(1.0 + speed / 12.0, 3.0)
+            dx *= gain * accel
+            dy *= gain * accel
+            var newPoint = CGPoint(x: focusPoint.x + dx, y: focusPoint.y + dy)
+            clampToAllDisplays(&newPoint)
+            focusPoint = newPoint
+            postPointerMove(to: newPoint)
+            debugLog?.append(
+                rawX: x, rawY: y,
+                rawDx: rawDx, rawDy: rawDy,
+                visualDx: visualDx, visualDy: visualDy,
+                outDx: dx, outDy: dy,
+                focusX: focusPoint.x, focusY: focusPoint.y
+            )
+            return
+        }
 
         var newPoint = CGPoint(x: focusPoint.x + dx, y: focusPoint.y + dy)
         clampToPrimaryScreen(&newPoint)
@@ -391,14 +474,93 @@ final class TrackpadDriver {
         let nowPressed = sample.isClicked && sample.isTouching
         if nowPressed && !wasClickPressed {
             wasClickPressed = true
+            if pointerMode {
+                pointerDown()
+                return
+            }
             isPressed = true
             overlay.setPressed(true)
         } else if !nowPressed && wasClickPressed {
             wasClickPressed = false
+            if pointerMode {
+                pointerUp()
+                return
+            }
             isPressed = false
             overlay.setPressed(false)
             activateSelection()
         }
+    }
+
+    // MARK: - Pointer mode
+
+    private func pointerDown() {
+        guard !isPressed else { return }
+        isPressed = true
+        pointerPressClickCount = nextClickCount()
+        postPointerButton(.leftMouseDown, clickCount: pointerPressClickCount)
+    }
+
+    private func pointerUp() {
+        guard isPressed else { return }
+        isPressed = false
+        postPointerButton(.leftMouseUp, clickCount: pointerPressClickCount)
+    }
+
+    private func postPointerMove(to point: CGPoint) {
+        let type: CGEventType = isPressed ? .leftMouseDragged : .mouseMoved
+        guard let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: type,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        ) else { return }
+        event.post(tap: .cghidEventTap)
+    }
+
+    private func postPointerButton(_ type: CGEventType, clickCount: Int) {
+        guard let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: type,
+            mouseCursorPosition: focusPoint,
+            mouseButton: .left
+        ) else { return }
+        event.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
+        event.post(tap: .cghidEventTap)
+    }
+
+    /// Current cursor position in CG global (top-left origin) coordinates.
+    private static func currentCursorLocation() -> CGPoint? {
+        CGEvent(source: nil)?.location
+    }
+
+    /// Keep the pointer inside the union of all active displays (CG global
+    /// coordinates), so it can travel onto a second monitor.
+    private func clampToAllDisplays(_ point: inout CGPoint) {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
+            clampToPrimaryScreen(&point)
+            return
+        }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else {
+            clampToPrimaryScreen(&point)
+            return
+        }
+        let bounds = ids.prefix(Int(count)).map { CGDisplayBounds($0) }
+        // Already on a display: done. Otherwise snap to the nearest one.
+        if bounds.contains(where: { $0.contains(point) }) { return }
+        var best = point
+        var bestDist = CGFloat.greatestFiniteMagnitude
+        for b in bounds {
+            let c = CGPoint(
+                x: min(max(point.x, b.minX), b.maxX - 1),
+                y: min(max(point.y, b.minY), b.maxY - 1)
+            )
+            let d = hypot(c.x - point.x, c.y - point.y)
+            if d < bestDist { bestDist = d; best = c }
+        }
+        point = best
     }
 
     func leftClickDown() {

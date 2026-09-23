@@ -19,7 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let menuBar = MenuBarController()
         self.menuBar = menuBar
-        menuBar.appendLog("iRemote v0.6 - Siri Remote mic")
+        menuBar.appendLog("iRemote (UM fork) - Siri Remote pointer + mic")
         menuBar.appendLog("log: \(MenuBarController.logFilePath.path)")
 
         let remote = RemoteDictationService()
@@ -67,6 +67,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.restartApp()
             }
         )
+
+        if let trackpad {
+            menuBar.installTouchpadControls(
+                pointerMode: trackpad.pointerMode,
+                speed: trackpad.pointerSpeed,
+                setPointerMode: { [weak self] enabled in
+                    self?.trackpad?.setPointerMode(enabled)
+                    self?.menuBar?.appendLog("Touchpad mode: \(enabled ? "mouse pointer" : "focus highlight")")
+                },
+                setSpeed: { [weak self] speed in
+                    self?.trackpad?.setPointerSpeed(speed)
+                    self?.menuBar?.appendLog("Pointer speed: \(speed.title)")
+                }
+            )
+        }
 
         // Profile monitor: surfaces a coloured Bluetooth-access row
         // in the menu. Two signals feed it — the authoritative helper
@@ -121,7 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // would re-queue the event on the default-mode dispatch queue
             // and stall it while NSMenu is in modal tracking — that was the
             // MENU-doesn't-close bug. Call synchronously instead.
-            MainActor.assumeIsolated {
+            MainActor.assumeIsolatedCompat {
                 self?.handleRemoteEvent(event)
             }
         }

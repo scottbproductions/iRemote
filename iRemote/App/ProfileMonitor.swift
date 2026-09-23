@@ -105,7 +105,7 @@ final class ProfileMonitor {
             withTimeInterval: recomputeIntervalSeconds,
             repeats: true
         ) { [weak self] _ in
-            Task { @MainActor in self?.recompute() }
+            Task { @MainActor [weak self] in self?.recompute() }
         }
         startHelperPoll()
         recompute()
