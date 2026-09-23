@@ -76,6 +76,10 @@ final class TrackpadDriver {
     private var pressConsumed = false
     private var rightClickWork: DispatchWorkItem?
     private static let tapToClickDefaultsKey = "iRemote.trackpad.tapToClick"
+    /// While MENU is held, the touchpad scrolls instead of moving the pointer.
+    private var scrollHeld = false
+    private var scrolledDuringHold = false
+    private let scrollGain: Double
     private struct FocusTarget {
         let element: AXUIElement
         let frame: CGRect
@@ -175,7 +179,8 @@ final class TrackpadDriver {
         self.calibration = TouchpadCalibration.loadFromDefaults()
         self.allowMouseFallback = env["IREMOTE_TRACKPAD_MOUSE_FALLBACK"] == "1"
         self.pointerBaseGain = Double(env["IREMOTE_POINTER_GAIN"] ?? "") ?? 1.2
-        self.pointerStiction = Double(env["IREMOTE_POINTER_STICTION"] ?? "") ?? 7
+        self.pointerStiction = Double(env["IREMOTE_POINTER_STICTION"] ?? "") ?? 11
+        self.scrollGain = Double(env["IREMOTE_SCROLL_GAIN"] ?? "") ?? 2.0
         self.tapToClick = UserDefaults.standard.object(forKey: Self.tapToClickDefaultsKey) as? Bool ?? true
         let defaults = UserDefaults.standard
         self.pointerMode = defaults.object(forKey: Self.pointerModeDefaultsKey) as? Bool ?? true
@@ -204,6 +209,16 @@ final class TrackpadDriver {
         UserDefaults.standard.set(enabled, forKey: Self.pointerModeDefaultsKey)
         selectedTarget = nil
         overlay.hideImmediately()
+    }
+
+    /// Returns whether any scrolling happened during the hold (so a quick
+    /// MENU tap can still open the menu).
+    @discardableResult
+    func setScrollHeld(_ held: Bool) -> Bool {
+        scrollHeld = held
+        let scrolled = scrolledDuringHold
+        if held { scrolledDuringHold = false }
+        return scrolled
     }
 
     func setTapToClick(_ enabled: Bool) {
@@ -348,6 +363,12 @@ final class TrackpadDriver {
                 lastPointerMotionAt = sampleTime
             } else if sampleTime - lastPointerMotionAt > restAfterStill {
                 pointerResting = true
+                return
+            }
+
+            if scrollHeld {
+                postScroll(dx: dx, dy: dy)
+                scrolledDuringHold = true
                 return
             }
 
@@ -619,6 +640,22 @@ final class TrackpadDriver {
         pointerPressClickCount = nextClickCount()
         postPointerButton(.leftMouseDown, clickCount: pointerPressClickCount)
         postPointerButton(.leftMouseUp, clickCount: pointerPressClickCount)
+    }
+
+    private func postScroll(dx: Double, dy: Double) {
+        // Content follows the thumb, like a phone.
+        let v = Int32((dy * scrollGain).rounded())
+        let h = Int32((dx * scrollGain).rounded())
+        guard v != 0 || h != 0,
+              let event = CGEvent(
+                scrollWheelEvent2Source: nil,
+                units: .pixel,
+                wheelCount: 2,
+                wheel1: v,
+                wheel2: h,
+                wheel3: 0
+              ) else { return }
+        event.post(tap: .cghidEventTap)
     }
 
     private func postRightClick() {

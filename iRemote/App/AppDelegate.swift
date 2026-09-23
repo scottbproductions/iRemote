@@ -196,6 +196,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleHIDEvent(_ event: HIDEvent) {
         switch event.kind {
         case .connected, .disconnected:
+            hidRemoteConnected = (event.kind == .connected)
+            if !hidRemoteConnected { releaseWispr() }
             menuBar?.appendLog("Remote HID: \(event.text)")
         case .button:
             handleRemoteButton(event.text)
@@ -206,22 +208,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // axes, so we just ignore them here without crashing.
             break
         case .raw:
-            break
+            if HIDManager.traceValues { menuBar?.appendLog("HID \(event.text)") }
         }
     }
+
+    private var menuDownAt: TimeInterval?
 
     private func handleRemoteButton(_ text: String) {
         menuBar?.appendLog("Remote button: \(text)")
 
+        // MENU (UM fork): hold + slide = scroll; a quick tap still opens
+        // the iRemote menu.
+        if text.hasPrefix("Menu") {
+            if text.contains("↓") {
+                menuDownAt = CFAbsoluteTimeGetCurrent()
+                trackpad?.setScrollHeld(true)
+            } else if text.contains("↑") {
+                let scrolled = trackpad?.setScrollHeld(false) ?? false
+                if let down = menuDownAt, !scrolled, CFAbsoluteTimeGetCurrent() - down < 0.4 {
+                    menuBar?.toggleMenu()
+                }
+                menuDownAt = nil
+            }
+            return
+        }
+
         // The Siri/mic button comes through the macOS HID stack on this
         // remote — the MENU button and touchpad do NOT (see
         // handleRemoteBLEButton / handleTouchpadSample for those paths).
-        guard text.hasPrefix("Search/Siri") else { return }
+        guard text.hasPrefix("Search/Siri") || text.hasPrefix("Microphone") else { return }
 
-        // Wispr mode is driven from the BLE button stream (see
-        // handleRemoteBLEButton); on the Intel MacBook the HID path never
-        // reports the mic button.
-        if micUsesWispr { return }
+        // Wispr mode: HID reports the mic button instantly (the packet-log
+        // path lags until PacketLogger flushes its buffer).
+        if micUsesWispr {
+            if text.contains("↓") {
+                fnKey.press()
+                menuBar?.setStatus(.recording)
+            } else if text.contains("↑") {
+                releaseWispr()
+            }
+            return
+        }
 
         if text.contains("↓") {
             let hasFrames = remote?.setRemoteMicButtonDown(true) ?? false
@@ -249,7 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Mic button via BLE: 0x10 = pressed, 0x00 after 0x10 = released.
         // One path only (never HID too): a late event from a second path
         // could re-press fn after release and leave Wispr listening.
-        if micUsesWispr {
+        if micUsesWispr, !hidRemoteConnected {
             if code == 0x10 {
                 fnKey.press()
                 lastVoiceFrameAt = CFAbsoluteTimeGetCurrent()
@@ -267,7 +294,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // release as a MENU release just because some bit happens
             // to alias 0x20. Touchpad clicks come through the touchpad
             // sample stream (byte 1 = 0x80), not the button stream.
-            if released == 0x20 {
+            // With HID matched, MENU is handled instantly in
+            // handleRemoteButton; don't toggle twice.
+            if released == 0x20, !hidRemoteConnected {
                 menuBar?.toggleMenu()
             }
         } else {
@@ -276,6 +305,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// True once the HID path has matched the remote; then HID owns the mic
+    /// button and the BLE fallback stays out of the way.
+    private var hidRemoteConnected = false
     private var lastVoiceFrameAt: TimeInterval = 0
     /// The remote streams voice only while the mic button is held. If frames
     /// stop, the button was released even if the 0x00 event is still stuck in

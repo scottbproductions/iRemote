@@ -73,11 +73,22 @@ final class HIDManager {
         self.onEvent = onEvent
     }
 
+    /// Diagnostics: log every HID value (`defaults write
+    /// io.github.jono-shaw.iRemote iRemote.hidTrace -bool true`).
+    static let traceValues = UserDefaults.standard.bool(forKey: "iRemote.hidTrace")
+
     func start() throws {
         // Match Apple vendor; we filter further inside the matched callback so we
         // also notice unexpected Apple devices instead of silently missing them.
-        let matching: [String: Any] = [kIOHIDVendorIDKey: 0x05AC]
-        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
+        // UM fork: over Bluetooth LE the remote reports Apple's *Bluetooth*
+        // vendor ID (0x004C = 76), not the USB one (0x05AC). Matching only
+        // 0x05AC meant the remote was never seen on the Intel MacBook, so
+        // every button fell back to the (buffered, laggy) packet-log path.
+        let matching: [[String: Any]] = [
+            [kIOHIDVendorIDKey: 0x05AC],
+            [kIOHIDVendorIDKey: 0x004C],
+        ]
+        IOHIDManagerSetDeviceMatchingMultiple(manager, matching as CFArray)
 
         let ctx = Unmanaged.passUnretained(self).toOpaque()
 
@@ -151,11 +162,18 @@ final class HIDManager {
         let usage = IOHIDElementGetUsage(element)
         let intValue = IOHIDValueGetIntegerValue(value)
 
+        if Self.traceValues {
+            onEvent(HIDEvent(kind: .raw, text: String(format: "value page=0x%02x usage=0x%02x v=%ld", usagePage, usage, intValue)))
+        }
+
         // Generic Desktop X/Y axes carry touchpad position. Surface them as
         // .axis events so the trackpad driver can turn them into cursor
         // movement; the button parser (which ignores them) is untouched.
         if usagePage == 0x01 {
             switch usage {
+            case 0x86: // System App Menu = the remote's MENU button (UM fork)
+                onEvent(HIDEvent(kind: .button, text: intValue != 0 ? "Menu ↓" : "Menu ↑"))
+                return
             case 0x30: // X
                 onEvent(HIDEvent(kind: .axis, text: "X=\(intValue)", axisX: Int(intValue), axisY: nil))
                 return

@@ -37,6 +37,10 @@ enum ButtonReportParser {
         // Standard HID Consumer Page usages most likely to appear from Siri Remote.
         // Some Apple-private mappings show up here too; unknowns get hex.
         switch usage {
+        // Observed on the 1st-gen remote paired to macOS 13 (UM fork):
+        // 0x0004 is the mic button, 0x0080 the touchpad click.
+        case 0x0004: return "Microphone"
+        case 0x0080: return "Selection"
         case 0x0040: return "Menu"
         case 0x00B0: return "Play"
         case 0x00B1: return "Pause"
