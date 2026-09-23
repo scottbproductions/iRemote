@@ -47,6 +47,35 @@ final class TrackpadDriver {
     private let pointerBaseGain: Double
     /// Click count of the mouse-down still held, so mouse-up matches it.
     private var pointerPressClickCount = 1
+
+    // Scott (msg 17982): a resting thumb nudged the pointer, making small
+    // targets hard to hit; he wanted tap-to-click and a right-click that
+    // doesn't need two fingers.
+    /// "Sticky" zone: after the finger settles, the pointer stays put until
+    /// the finger has travelled this many screen points.
+    private let pointerStiction: Double
+    /// Ignore the jitter of a finger landing on the pad.
+    private let touchLandingIgnore: TimeInterval = 0.10
+    private let restAfterStill: TimeInterval = 0.15
+    private var pointerResting = true
+    private var restAccumX = 0.0
+    private var restAccumY = 0.0
+    private var lastPointerMotionAt: TimeInterval = 0
+    private var touchStartedAt: TimeInterval?
+    private var touchTravel = 0.0
+    private var touchHadPress = false
+    /// A quick light tap (no press) clicks, like a laptop trackpad.
+    private(set) var tapToClick: Bool
+    private let tapMaxDuration: TimeInterval = 0.22
+    private let tapMaxTravel = 6.0
+    /// Press and hold without moving = right-click.
+    private let rightClickHold: TimeInterval = 0.55
+    private let dragStartTravel = 5.0
+    private var pressTravel = 0.0
+    private var dragActive = false
+    private var pressConsumed = false
+    private var rightClickWork: DispatchWorkItem?
+    private static let tapToClickDefaultsKey = "iRemote.trackpad.tapToClick"
     private struct FocusTarget {
         let element: AXUIElement
         let frame: CGRect
@@ -146,6 +175,8 @@ final class TrackpadDriver {
         self.calibration = TouchpadCalibration.loadFromDefaults()
         self.allowMouseFallback = env["IREMOTE_TRACKPAD_MOUSE_FALLBACK"] == "1"
         self.pointerBaseGain = Double(env["IREMOTE_POINTER_GAIN"] ?? "") ?? 1.2
+        self.pointerStiction = Double(env["IREMOTE_POINTER_STICTION"] ?? "") ?? 7
+        self.tapToClick = UserDefaults.standard.object(forKey: Self.tapToClickDefaultsKey) as? Bool ?? true
         let defaults = UserDefaults.standard
         self.pointerMode = defaults.object(forKey: Self.pointerModeDefaultsKey) as? Bool ?? true
         self.pointerSpeed = PointerSpeed(rawValue: defaults.string(forKey: Self.pointerSpeedDefaultsKey) ?? "") ?? .normal
@@ -167,10 +198,17 @@ final class TrackpadDriver {
 
     func setPointerMode(_ enabled: Bool) {
         if isPressed { pointerUp() }
+        rightClickWork?.cancel()
+        dragActive = false
         pointerMode = enabled
         UserDefaults.standard.set(enabled, forKey: Self.pointerModeDefaultsKey)
         selectedTarget = nil
         overlay.hideImmediately()
+    }
+
+    func setTapToClick(_ enabled: Bool) {
+        tapToClick = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.tapToClickDefaultsKey)
     }
 
     func setPointerSpeed(_ speed: PointerSpeed) {
@@ -182,6 +220,16 @@ final class TrackpadDriver {
         updateClickState(sample: sample)
 
         guard sample.isTouching else {
+            if pointerMode, let started = touchStartedAt {
+                let held = CFAbsoluteTimeGetCurrent() - started
+                if tapToClick, !touchHadPress, !isPressed,
+                   held < tapMaxDuration, touchTravel < tapMaxTravel {
+                    let count = nextClickCount()
+                    postPointerButton(.leftMouseDown, clickCount: count)
+                    postPointerButton(.leftMouseUp, clickCount: count)
+                }
+            }
+            touchStartedAt = nil
             resetTouchTracking()
             selectedTarget = nil
             if !pointerMode {
@@ -205,6 +253,14 @@ final class TrackpadDriver {
                 // Start from wherever the Mac's own trackpad/mouse left
                 // the cursor, so the two never fight.
                 focusPoint = Self.currentCursorLocation() ?? focusPoint
+                if touchStartedAt == nil {
+                    touchStartedAt = sampleTime
+                    touchTravel = 0
+                    touchHadPress = isPressed
+                }
+                pointerResting = true
+                restAccumX = 0
+                restAccumY = 0
             } else {
                 updateSelection(at: focusPoint)
             }
@@ -268,6 +324,42 @@ final class TrackpadDriver {
             let accel = min(1.0 + speed / 12.0, 3.0)
             dx *= gain * accel
             dy *= gain * accel
+
+            if let started = touchStartedAt, sampleTime - started < touchLandingIgnore {
+                return
+            }
+            let step = hypot(dx, dy)
+            touchTravel += step
+            if isPressed { pressTravel += step }
+
+            // Sticky zone: a settled finger must travel `pointerStiction`
+            // points before the pointer moves again.
+            if pointerResting {
+                restAccumX += dx
+                restAccumY += dy
+                guard hypot(restAccumX, restAccumY) >= pointerStiction else { return }
+                pointerResting = false
+                dx = restAccumX
+                dy = restAccumY
+                restAccumX = 0
+                restAccumY = 0
+            }
+            if step > 0.6 {
+                lastPointerMotionAt = sampleTime
+            } else if sampleTime - lastPointerMotionAt > restAfterStill {
+                pointerResting = true
+                return
+            }
+
+            // Pressed and moving = drag. Mouse-down is deferred until now so a
+            // still press can become a right-click instead.
+            if isPressed, !dragActive, !pressConsumed, pressTravel >= dragStartTravel {
+                rightClickWork?.cancel()
+                dragActive = true
+                postPointerButton(.leftMouseDown, clickCount: 1)
+            }
+            if isPressed, !dragActive { return }
+
             var newPoint = CGPoint(x: focusPoint.x + dx, y: focusPoint.y + dy)
             clampToAllDisplays(&newPoint)
             focusPoint = newPoint
@@ -497,18 +589,52 @@ final class TrackpadDriver {
     private func pointerDown() {
         guard !isPressed else { return }
         isPressed = true
-        pointerPressClickCount = nextClickCount()
-        postPointerButton(.leftMouseDown, clickCount: pointerPressClickCount)
+        touchHadPress = true
+        pressTravel = 0
+        dragActive = false
+        pressConsumed = false
+        rightClickWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolatedCompat {
+                guard let self, self.isPressed, !self.dragActive, !self.pressConsumed else { return }
+                self.pressConsumed = true
+                self.postRightClick()
+            }
+        }
+        rightClickWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + rightClickHold, execute: work)
     }
 
     private func pointerUp() {
         guard isPressed else { return }
         isPressed = false
+        rightClickWork?.cancel()
+        rightClickWork = nil
+        if pressConsumed { return }
+        if dragActive {
+            dragActive = false
+            postPointerButton(.leftMouseUp, clickCount: 1)
+            return
+        }
+        pointerPressClickCount = nextClickCount()
+        postPointerButton(.leftMouseDown, clickCount: pointerPressClickCount)
         postPointerButton(.leftMouseUp, clickCount: pointerPressClickCount)
     }
 
+    private func postRightClick() {
+        for type in [CGEventType.rightMouseDown, .rightMouseUp] {
+            guard let event = CGEvent(
+                mouseEventSource: nil,
+                mouseType: type,
+                mouseCursorPosition: focusPoint,
+                mouseButton: .right
+            ) else { continue }
+            event.post(tap: .cghidEventTap)
+        }
+    }
+
     private func postPointerMove(to point: CGPoint) {
-        let type: CGEventType = isPressed ? .leftMouseDragged : .mouseMoved
+        let type: CGEventType = dragActive ? .leftMouseDragged : .mouseMoved
         guard let event = CGEvent(
             mouseEventSource: nil,
             mouseType: type,

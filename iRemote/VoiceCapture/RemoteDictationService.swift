@@ -218,6 +218,10 @@ final class RemoteDictationService {
     /// UM fork: false while the mic button is routed to Wispr Flow, so the
     /// remote's own (lossy) audio never produces a second transcript.
     var remoteVoiceEnabled = true
+    /// Fires for every remote voice frame, even when remote voice is off —
+    /// the remote only streams while the mic button is held, so frames
+    /// stopping is a release signal.
+    var onVoiceFrame: (() -> Void)?
     private var voiceMonitor: RemotePklgVoiceMonitor?
     private var streamFinalizeTask: Task<Void, Never>?
     private var activeRollingWorkDir: String?
@@ -594,6 +598,7 @@ final class RemoteDictationService {
     }
 
     private func handleRemoteVoiceFrame(_ frame: Data) {
+        onVoiceFrame?()
         guard remoteVoiceEnabled, !frame.isEmpty else { return }
 
         let wasEmpty = currentFrames.isEmpty

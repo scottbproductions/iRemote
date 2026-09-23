@@ -51,6 +51,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var setPointerModeAction: ((Bool) -> Void)?
     private var setPointerSpeedAction: ((TrackpadDriver.PointerSpeed) -> Void)?
     private var micUsesWispr = false
+    private var tapToClickEnabled = true
+    private var setTapToClickAction: ((Bool) -> Void)?
     private var setMicUsesWispr: ((Bool) -> Void)?
     private var profileStatus: ProfileMonitor.Status = .listenerStopped
     private let statusGlyphView = StatusGlyphView(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
@@ -206,8 +208,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         pointerMode: Bool,
         speed: TrackpadDriver.PointerSpeed,
         setPointerMode: @escaping (Bool) -> Void,
+        tapToClick: Bool,
+        setTapToClick: @escaping (Bool) -> Void,
         setSpeed: @escaping (TrackpadDriver.PointerSpeed) -> Void
     ) {
+        tapToClickEnabled = tapToClick
+        setTapToClickAction = setTapToClick
         pointerModeEnabled = pointerMode
         pointerSpeed = speed
         setPointerModeAction = setPointerMode
@@ -491,6 +497,26 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             }
             item.target = target
             item.representedObject = target
+            menu.addItem(item)
+        }
+
+        if let setTap = setTapToClickAction {
+            let item = NSMenuItem(
+                title: "Tap to Click",
+                action: #selector(ClosureTarget.invoke),
+                keyEquivalent: ""
+            )
+            item.image = menuSymbolImage("hand.tap")
+            item.state = tapToClickEnabled ? .on : .off
+            let enabled = tapToClickEnabled
+            let target = ClosureTarget { [weak self] in
+                self?.tapToClickEnabled = !enabled
+                setTap(!enabled)
+                self?.rebuildMenu()
+            }
+            item.target = target
+            item.representedObject = target
+            item.isEnabled = pointerModeEnabled
             menu.addItem(item)
         }
 

@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let remote = RemoteDictationService()
         self.remote = remote
         remote.remoteVoiceEnabled = !micUsesWispr
+        remote.onVoiceFrame = { [weak self] in self?.noteVoiceFrame() }
         for line in remote.readinessLines {
             menuBar.appendLog(line)
         }
@@ -90,6 +91,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 setPointerMode: { [weak self] enabled in
                     self?.trackpad?.setPointerMode(enabled)
                     self?.menuBar?.appendLog("Touchpad mode: \(enabled ? "mouse pointer" : "focus highlight")")
+                },
+                tapToClick: trackpad.tapToClick,
+                setTapToClick: { [weak self] enabled in
+                    self?.trackpad?.setTapToClick(enabled)
+                    self?.menuBar?.appendLog("Tap to click: \(enabled ? "on" : "off")")
                 },
                 setSpeed: { [weak self] speed in
                     self?.trackpad?.setPointerSpeed(speed)
@@ -212,16 +218,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // handleRemoteBLEButton / handleTouchpadSample for those paths).
         guard text.hasPrefix("Search/Siri") else { return }
 
-        if micUsesWispr {
-            if text.contains("↓") {
-                fnKey.press()
-                menuBar?.setStatus(.recording)
-            } else if text.contains("↑") {
-                fnKey.release()
-                menuBar?.setStatus(listenerRunning ? .listening : .standby)
-            }
-            return
-        }
+        // Wispr mode is driven from the BLE button stream (see
+        // handleRemoteBLEButton); on the Intel MacBook the HID path never
+        // reports the mic button.
+        if micUsesWispr { return }
 
         if text.contains("↓") {
             let hasFrames = remote?.setRemoteMicButtonDown(true) ?? false
@@ -246,14 +246,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastBLEButtonPress: UInt8 = 0
 
     private func handleRemoteBLEButton(code: UInt8) {
-        // Mic button via BLE (0x10) — used for Wispr only when the HID path
-        // is unavailable. Never both: BLE events arrive late through the
-        // capture file, so mixing paths could re-press fn after release.
-        if micUsesWispr, hidManager == nil {
+        // Mic button via BLE: 0x10 = pressed, 0x00 after 0x10 = released.
+        // One path only (never HID too): a late event from a second path
+        // could re-press fn after release and leave Wispr listening.
+        if micUsesWispr {
             if code == 0x10 {
                 fnKey.press()
+                lastVoiceFrameAt = CFAbsoluteTimeGetCurrent()
+                scheduleVoiceSilenceCheck()
+                menuBar?.setStatus(.recording)
             } else if code == 0x00, lastBLEButtonPress == 0x10 {
-                fnKey.release()
+                releaseWispr()
             }
         }
         if code == 0x00 {
@@ -271,6 +274,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lastBLEButtonPress = code
             menuBar?.appendLog(String(format: "Remote BLE button pressed: 0x%02X", code))
         }
+    }
+
+    private var lastVoiceFrameAt: TimeInterval = 0
+    /// The remote streams voice only while the mic button is held. If frames
+    /// stop, the button was released even if the 0x00 event is still stuck in
+    /// PacketLogger's buffer — let go of fn so Wispr finishes promptly.
+    private let voiceSilenceRelease: TimeInterval = 0.6
+
+    private func noteVoiceFrame() {
+        lastVoiceFrameAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    private func scheduleVoiceSilenceCheck() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            MainActor.assumeIsolatedCompat {
+                guard let self, self.fnKey.isHeld else { return }
+                if CFAbsoluteTimeGetCurrent() - self.lastVoiceFrameAt > self.voiceSilenceRelease {
+                    self.releaseWispr()
+                } else {
+                    self.scheduleVoiceSilenceCheck()
+                }
+            }
+        }
+    }
+
+    private func releaseWispr() {
+        guard fnKey.isHeld else { return }
+        fnKey.release()
+        menuBar?.setStatus(listenerRunning ? .listening : .standby)
     }
 
     private func handleTouchpadSample(_ sample: RemoteTouchpadSample) {
