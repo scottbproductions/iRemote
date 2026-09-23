@@ -50,6 +50,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var pointerSpeed: TrackpadDriver.PointerSpeed = .normal
     private var setPointerModeAction: ((Bool) -> Void)?
     private var setPointerSpeedAction: ((TrackpadDriver.PointerSpeed) -> Void)?
+    private var micUsesWispr = false
+    private var setMicUsesWispr: ((Bool) -> Void)?
     private var profileStatus: ProfileMonitor.Status = .listenerStopped
     private let statusGlyphView = StatusGlyphView(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
     /// Kept across rebuilds so `menu(_:willHighlight:)` can morph the
@@ -194,6 +196,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// coloured icon and label refresh whenever the status changes,
     /// and refreshes the menu-bar glyph because the warning overlay
     /// depends on the profile state.
+    func installMicControl(usesWispr: Bool, set: @escaping (Bool) -> Void) {
+        micUsesWispr = usesWispr
+        setMicUsesWispr = set
+        rebuildMenu()
+    }
+
     func installTouchpadControls(
         pointerMode: Bool,
         speed: TrackpadDriver.PointerSpeed,
@@ -444,6 +452,26 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         if calibrateTouchpadAction != nil || resetCalibrationAction != nil || setPointerModeAction != nil {
             menu.addItem(.separator())
+        }
+
+        // Mic button → Wispr Flow (holds fn) vs. remote mic + whisper
+        if let setMic = setMicUsesWispr {
+            let item = NSMenuItem(
+                title: "Mic Button Uses Wispr Flow",
+                action: #selector(ClosureTarget.invoke),
+                keyEquivalent: ""
+            )
+            item.image = menuSymbolImage("mic")
+            item.state = micUsesWispr ? .on : .off
+            let enabled = micUsesWispr
+            let target = ClosureTarget { [weak self] in
+                self?.micUsesWispr = !enabled
+                setMic(!enabled)
+                self?.rebuildMenu()
+            }
+            item.target = target
+            item.representedObject = target
+            menu.addItem(item)
         }
 
         // Touchpad: Mouse Pointer (on) vs. Focus Highlight (off)

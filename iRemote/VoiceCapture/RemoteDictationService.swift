@@ -215,6 +215,9 @@ final class RemoteDictationService {
     private let rollingWorkDir = "/tmp/iremote-window-live"
     private var currentFrames: [Data] = []
     private var micButtonHeld = false
+    /// UM fork: false while the mic button is routed to Wispr Flow, so the
+    /// remote's own (lossy) audio never produces a second transcript.
+    var remoteVoiceEnabled = true
     private var voiceMonitor: RemotePklgVoiceMonitor?
     private var streamFinalizeTask: Task<Void, Never>?
     private var activeRollingWorkDir: String?
@@ -591,7 +594,7 @@ final class RemoteDictationService {
     }
 
     private func handleRemoteVoiceFrame(_ frame: Data) {
-        guard !frame.isEmpty else { return }
+        guard remoteVoiceEnabled, !frame.isEmpty else { return }
 
         let wasEmpty = currentFrames.isEmpty
         currentFrames.append(frame)

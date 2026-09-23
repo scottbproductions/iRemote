@@ -145,7 +145,7 @@ final class TrackpadDriver {
         // UserDefaults from then on.
         self.calibration = TouchpadCalibration.loadFromDefaults()
         self.allowMouseFallback = env["IREMOTE_TRACKPAD_MOUSE_FALLBACK"] == "1"
-        self.pointerBaseGain = Double(env["IREMOTE_POINTER_GAIN"] ?? "") ?? 2.2
+        self.pointerBaseGain = Double(env["IREMOTE_POINTER_GAIN"] ?? "") ?? 1.2
         let defaults = UserDefaults.standard
         self.pointerMode = defaults.object(forKey: Self.pointerModeDefaultsKey) as? Bool ?? true
         self.pointerSpeed = PointerSpeed(rawValue: defaults.string(forKey: Self.pointerSpeedDefaultsKey) ?? "") ?? .normal

@@ -15,6 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var totalUtterances: Int = 0
     private var injectResults = true
     private var listenerRunning = false
+    private let fnKey = FnKeyHold()
+    private static let micModeDefaultsKey = "iRemote.micButtonUsesWispr"
+    /// Mic button → hold fn (Wispr Flow) instead of remote-mic dictation.
+    private var micUsesWispr: Bool = UserDefaults.standard.object(forKey: AppDelegate.micModeDefaultsKey) as? Bool
+        ?? FnKeyHold.wisprInstalled
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let menuBar = MenuBarController()
@@ -24,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let remote = RemoteDictationService()
         self.remote = remote
+        remote.remoteVoiceEnabled = !micUsesWispr
         for line in remote.readinessLines {
             menuBar.appendLog(line)
         }
@@ -68,6 +74,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
 
+        menuBar.installMicControl(usesWispr: micUsesWispr) { [weak self] enabled in
+            guard let self else { return }
+            self.fnKey.release()
+            self.micUsesWispr = enabled
+            UserDefaults.standard.set(enabled, forKey: Self.micModeDefaultsKey)
+            self.remote?.remoteVoiceEnabled = !enabled
+            self.menuBar?.appendLog("Mic button: \(enabled ? "Wispr Flow (holds fn)" : "remote mic + whisper")")
+        }
+
         if let trackpad {
             menuBar.installTouchpadControls(
                 pointerMode: trackpad.pointerMode,
@@ -109,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        fnKey.release()
         stopRemoteListener()
     }
 
@@ -196,6 +212,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // handleRemoteBLEButton / handleTouchpadSample for those paths).
         guard text.hasPrefix("Search/Siri") else { return }
 
+        if micUsesWispr {
+            if text.contains("↓") {
+                fnKey.press()
+                menuBar?.setStatus(.recording)
+            } else if text.contains("↑") {
+                fnKey.release()
+                menuBar?.setStatus(listenerRunning ? .listening : .standby)
+            }
+            return
+        }
+
         if text.contains("↓") {
             let hasFrames = remote?.setRemoteMicButtonDown(true) ?? false
             if listenerRunning || hasFrames {
@@ -219,6 +246,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastBLEButtonPress: UInt8 = 0
 
     private func handleRemoteBLEButton(code: UInt8) {
+        // Mic button via BLE (0x10) — used for Wispr only when the HID path
+        // is unavailable. Never both: BLE events arrive late through the
+        // capture file, so mixing paths could re-press fn after release.
+        if micUsesWispr, hidManager == nil {
+            if code == 0x10 {
+                fnKey.press()
+            } else if code == 0x00, lastBLEButtonPress == 0x10 {
+                fnKey.release()
+            }
+        }
         if code == 0x00 {
             let released = lastBLEButtonPress
             lastBLEButtonPress = 0
