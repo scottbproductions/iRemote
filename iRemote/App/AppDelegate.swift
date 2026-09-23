@@ -100,7 +100,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.setMode("Live")
         menuBar.setInjectionEnabled(injectResults)
 
-        if remote.readinessProblem == nil {
+        // UM fork: the touchpad + buttons only need PacketLogger. Start
+        // listening as soon as it's present, even while whisper / a model
+        // is still missing, so the mouse works before voice is set up.
+        if remote.canCaptureRemote {
             startRemoteListener()
         }
     }

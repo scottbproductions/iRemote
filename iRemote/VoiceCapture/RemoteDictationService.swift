@@ -349,6 +349,11 @@ final class RemoteDictationService {
         return lines
     }
 
+    /// Enough to receive touchpad + button traffic (voice needs more).
+    var canCaptureRemote: Bool {
+        FileManager.default.isExecutableFile(atPath: packetLoggerPath)
+    }
+
     var readinessProblem: String? {
         let fm = FileManager.default
         if !fm.isExecutableFile(atPath: packetLoggerPath) {
