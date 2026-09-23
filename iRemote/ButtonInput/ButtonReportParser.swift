@@ -40,6 +40,7 @@ enum ButtonReportParser {
         // Observed on the 1st-gen remote paired to macOS 13 (UM fork):
         // 0x0004 is the mic button, 0x0080 the touchpad click.
         case 0x0004: return "Microphone"
+        case 0x0060: return "TV"
         case 0x0080: return "Selection"
         case 0x0040: return "Menu"
         case 0x00B0: return "Play"

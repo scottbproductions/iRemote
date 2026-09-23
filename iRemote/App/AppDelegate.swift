@@ -213,9 +213,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var menuDownAt: TimeInterval?
+    private var scrollToggled = false
 
     private func handleRemoteButton(_ text: String) {
         menuBar?.appendLog("Remote button: \(text)")
+
+        // TV (UM fork, Scott msg 17993): one-handed scroll toggle. Press once
+        // and the touchpad scrolls; press again and it moves the pointer.
+        if text.hasPrefix("TV") {
+            if text.contains("↓"), let trackpad {
+                scrollToggled.toggle()
+                trackpad.setScrollHeld(scrollToggled)
+                menuBar?.appendLog("Scroll mode: \(scrollToggled ? "on" : "off")")
+                NSSound(named: scrollToggled ? "Tink" : "Pop")?.play()
+            }
+            return
+        }
 
         // MENU (UM fork): hold + slide = scroll; a quick tap still opens
         // the iRemote menu.
@@ -224,7 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 menuDownAt = CFAbsoluteTimeGetCurrent()
                 trackpad?.setScrollHeld(true)
             } else if text.contains("↑") {
-                let scrolled = trackpad?.setScrollHeld(false) ?? false
+                let scrolled = trackpad?.setScrollHeld(scrollToggled) ?? false
                 if let down = menuDownAt, !scrolled, CFAbsoluteTimeGetCurrent() - down < 0.4 {
                     menuBar?.toggleMenu()
                 }
